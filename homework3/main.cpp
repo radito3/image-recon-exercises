@@ -175,7 +175,6 @@ private:
     std::unordered_map<const char*, QProgressBar*> progressBars;
 };
 
-// Function to apply FFT on 1D sequences without external libraries
 void fft(std::vector<std::complex<double>>& a) {
     int n = a.size();
     if (n <= 1) {
@@ -195,6 +194,8 @@ void fft(std::vector<std::complex<double>>& a) {
 
     // Combine the results
     for (int i = 0; i < n / 2; i++) {
+        // std::polar(r, theta) r - magnitude, theta - phase angle
+        // essentially -> std::complex(r * cos(theta), r * sin(theta))
         std::complex<double> t = std::polar(1.0, -2.0 * M_PI * i / n) * odd[i];
         a[i] = even[i] + t;
         a[i + n / 2] = even[i] - t;
@@ -204,7 +205,7 @@ void fft(std::vector<std::complex<double>>& a) {
 // Function to apply FFT on 1D sequences and return magnitude spectrum
 std::vector<double> applyFFT(const std::vector<std::complex<double>> &contours) {
     int N = contours.size();
-    std::vector<std::complex<double>> input(contours);
+    std::vector<std::complex<double>> input = contours;
 
     fft(input);
 
@@ -384,88 +385,127 @@ void connectContours(std::vector<Point>& contours, double proximityThreshold) {
 
 // -------------- contour detection --------------
 
+// -------------- analysis --------------------
+
+// this might only need be done for the test dataset?
+// as in, after the model has been trained:
+//  - check its base accuracy
+//  - get the high frequencies and start removing them (tune the peak threshold) from contours spectrum
+//  - until a certain accuracy regression threshold is reached 
+//      (e.g. if the base model is 80% accurate, a 10% reduction is the cut-off point - get the difference in frequencies)
+// the result of the experiment would be the number of high frequencies removed and their threshold (in findPeaks) for the
+// configured accuracy regression cut-off point (might be a program parameter)
+
+std::vector<size_t> findPeaks(const std::vector<double>& spectrum, double threshold = 0.5) {
+    std::vector<size_t> peaks;
+    for (size_t i = 1; i < spectrum.size() - 1; ++i) {
+        // the threshold is also a hyperparameter -> tune it for best results
+        if (spectrum[i] > spectrum[i - 1] && spectrum[i] > spectrum[i + 1] && spectrum[i] > threshold) {
+            peaks.push_back(i);
+        }
+    }
+    return peaks; // elements are indicies in the magnitute spectrum vector, pointing to the coefficients
+}
+
+/*
+    std::cout << "Dominant Frequencies:\n";
+    for (size_t peakIndex : peakIndices) {
+        // Frequency calculation: peakIndex / N, where N is the size of the spectrum
+        double frequency = static_cast<double>(peakIndex) / spectrum.size();
+        std::cout << "Frequency: " << frequency << " Hz, Magnitude: " << spectrum[peakIndex] << "\n";
+    }
+*/
+
+/*
+"high" frequencies would correspond to components in the spectrum with higher magnitudes.
+ These high-magnitude components represent the presence of rapid changes or variations in the contour.
+
+general guideline for interpreting frequency components in a spectrum:
+ - Low frequencies: Correspond to slowly changing or smooth variations in the signal.
+ - High frequencies: Correspond to rapid changes or abrupt transitions in the signal.
+
+When analyzing the spectrum of a contour, high-frequency components could capture details such as sharp corners,
+ small details, or irregularities in the contour. By identifying and analyzing these high-frequency components,
+  you may gain insights into the detailed structure of the contour.
+
+*/
+
+// -------------- analysis --------------------
+
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
 
-
     // ------------------- contours experiment -----------------------
-    // Assuming you have a binary image (black and white)
-    QImage binaryImage("bin_img.jpeg");
-    QPainterPath contoursP = detectContours(binaryImage);
-    // TODO: try with and without connecting the contours to see which model performs better
-    std::vector<Point> contours = detectContoursV(binaryImage);
-    // Set the proximity threshold (adjust as needed)
-    // after a certain value (~20-30), it stops affecting the connections
-    double proximityThreshold = 25.0; // this is, essentially, a hyperparameter
-    // Connect nearby contours
-    connectContours(contours, proximityThreshold);
+    // // Assuming you have a binary image (black and white)
+    // QImage binaryImage("bin_img.jpeg");
+    // QPainterPath contoursP = detectContours(binaryImage);
+    // // TODO: try with and without connecting the contours to see which model performs better
+    // std::vector<Point> contours = detectContoursV(binaryImage);
+    // // Set the proximity threshold (adjust as needed)
+    // // after a certain value (~20-30), it stops affecting the connections
+    // double proximityThreshold = 25.0; // this is, essentially, a hyperparameter
+    // // Connect nearby contours
+    // connectContours(contours, proximityThreshold);
 
-    // Create a QPainterPath from the connected contours
-    QPainterPath connectedPath;
-    if (!contours.empty()) {
-        connectedPath.moveTo(contours.front().real(), contours.front().imag());
-        for (const auto& point : contours) {
-            connectedPath.lineTo(point.real(), point.imag());
-        }
+    // // Create a QPainterPath from the connected contours
+    // QPainterPath connectedPath;
+    // if (!contours.empty()) {
+    //     connectedPath.moveTo(contours.front().real(), contours.front().imag());
+    //     for (const auto& point : contours) {
+    //         connectedPath.lineTo(point.real(), point.imag());
+    //     }
+    // }
+
+    // // Create a QGraphicsScene and add the contours to it
+    // QGraphicsScene scene;
+    // scene.addPath(connectedPath);
+    // // scene.addPath(contoursP);
+    // // Create a QGraphicsView to display the scene
+    // QGraphicsView view(&scene);
+    // view.show();
+    // ------------------- contours experiment -----------------------
+
+
+    qDebug() << "Downloading MNIST dataset files...";
+    DownloadDialog downloadDialog({
+        "http://yann.lecun.com/exdb/mnist/train-images-idx3-ubyte.gz", //train images (60 000)
+        "http://yann.lecun.com/exdb/mnist/train-labels-idx1-ubyte.gz", //train labels
+        "http://yann.lecun.com/exdb/mnist/t10k-images-idx3-ubyte.gz",  //test images (10 000)
+        "http://yann.lecun.com/exdb/mnist/t10k-labels-idx1-ubyte.gz"   //test labels
+    });
+    downloadDialog.show();
+    auto filePaths = downloadDialog.downloadAll();
+
+    const char* trainImages = "train-images-idx3-ubyte.gz";
+    const char* trainLabels = "train-labels-idx1-ubyte.gz";
+
+    qDebug() << "Reading MNIST train dataset...";
+    std::vector<std::vector<uint8_t>> images = readMNISTImages(trainImages);
+    std::vector<uint8_t> labels = readMNISTLabels(trainLabels);
+
+    for (const auto& imageBytes : images) {
+        // Create a QImage from the vector<uint8_t>
+        QImage image(imageBytes.data(), 28, 28, QImage::Format_Grayscale8);
+
+        auto contours = detectContoursV(image);
+
+        std::vector<double> magnituteSpectrum = applyFFT(contours);
+
+        // You may analyze the spectrum to determine which high-frequency coefficients (values in the spectrum) to cut
+
+        //accumulate train data somehow?
     }
-
-    // Create a QGraphicsScene and add the contours to it
-    QGraphicsScene scene;
-    scene.addPath(connectedPath);
-    // scene.addPath(contoursP);
-    // Create a QGraphicsView to display the scene
-    QGraphicsView view(&scene);
-    view.show();
-    // ------------------- contours experiment -----------------------
-
-
-    // qDebug() << "Downloading MNIST dataset files...";
-    // DownloadDialog downloadDialog({
-    //     "http://yann.lecun.com/exdb/mnist/train-images-idx3-ubyte.gz", //train images (60 000)
-    //     "http://yann.lecun.com/exdb/mnist/train-labels-idx1-ubyte.gz", //train labels
-    //     "http://yann.lecun.com/exdb/mnist/t10k-images-idx3-ubyte.gz",  //test images (10 000)
-    //     "http://yann.lecun.com/exdb/mnist/t10k-labels-idx1-ubyte.gz"   //test labels
-    // });
-    // downloadDialog.show();
-    // auto filePaths = downloadDialog.downloadAll();
-
-    // const char* trainImages = "train-images-idx3-ubyte.gz";
-    // const char* trainLabels = "train-labels-idx1-ubyte.gz";
-
-    // qDebug() << "Reading MNIST train dataset...";
-    // std::vector<std::vector<uint8_t>> images = readMNISTImages(trainImages);
-    // std::vector<uint8_t> labels = readMNISTLabels(trainLabels);
-
-    // for (const auto& imageBytes : images) {
-    //     // Create a QImage from the vector<uint8_t>
-    //     QImage image(imageBytes.data(), 28, 28, QImage::Format_Grayscale8);
-
-    //     // Calculate contours using the custom function
-    //     auto contours = detectContoursV(image); //TODO: binarize before getting contours?
-
-    //     std::vector<double> spectrum = applyFFT(contours);
-
-    //     // Analyze coefficients and determine how much to cut
-
-    //     // Your analysis logic here
-    //     // You may analyze the spectrum to determine which high-frequency coefficients to cut
-
-    //     //accumulate train data somehow?
-    // }
     
-    // // train a model?
+    // train a model? - maybe the training needs to make associations between the magnitute spectrum of an image's contours with its label
+    // that way we can have a direct impact on its performance when removing high frequencies
     
-    // // test the model
-    
-    // // perform analysis on how much of the high frequencies we can remove 
-    // // until a certain accuracy regression threshold is reached 
-    // // (e.g. if the base model is 80% accurate, a 10% reduction is the cut-off point - get the difference in frequencies)
+    // test the model
 
-    // qDebug() << "Cleaning up MNIST dataset files...";
-    // for (auto filePath : filePaths) {
-    //     std::remove(filePath.c_str());
-    // }
-    // downloadDialog.close();
+    qDebug() << "Cleaning up MNIST dataset files...";
+    for (auto filePath : filePaths) {
+        std::remove(filePath.c_str());
+    }
+    downloadDialog.close();
     return app.exec();
 }
 
