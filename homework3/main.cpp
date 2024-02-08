@@ -4,7 +4,6 @@
 *   QT += widgets
 *   QT += core network
 *   LIBS += -lz
-*   CONFIG += c++20
 *   
 * Optionally:
 *   MOC_DIR = $$OUT_PWD/moc
@@ -23,16 +22,22 @@
 #include <QFile>
 #include <QEventLoop>
 #include <QDebug>
-#include <QThreadPool>
+// #include <QThreadPool>
 #include <QImage>
+#include <QPainter>
+#include <QPainterPath>
+#include <QGraphicsView>
+#include <QGraphicsScene>
 
 #include <initializer_list>
 #include <unordered_map>
 // #include <iostream>
 #include <fstream>
+#include <filesystem>
 #include <vector>
 #include <complex>
 #include <cmath>
+#include <cstdio>
 
 #include <zlib.h>
 
@@ -68,6 +73,10 @@ public:
 
         // Create an event loop to wait for the request to finish
         loop.exec();
+    }
+
+    std::filesystem::path getFilePath() const {
+        return file.filesystemFileName();
     }
 
 private slots:
@@ -148,63 +157,47 @@ public:
         }
     }
 
-    void downloadAllAsync() {
+    std::vector<std::filesystem::path> downloadAll() {
+        std::vector<std::filesystem::path> filePaths;
+        // downladed sequentially instead of concurrently because the widget
+        // does not show up until after all the downloads have finished which
+        // invalidates the usage of progress bars in the first place...
         for (auto [url, pb] : progressBars) {
-            // capture by value, as these are pointers
-            QThreadPool::globalInstance()->start([=]() {
-                // captured structured bindings are a C++20 extension
-                // an alternative is to download the files sequentially (wihout using QThreadPool)
-                FileDownloader downloader(QUrl(url), pb);
-                downloader.download();
-            });
+            FileDownloader downloader(QUrl(url), pb);
+            // QThreadPool::globalInstance().start([=]() { download(url, pb); });
+            downloader.download();
+            filePaths.push_back(downloader.getFilePath());
         }
-    
-        // Wait for all tasks to finish
-        QThreadPool::globalInstance()->waitForDone();
+        return filePaths;
     }
 
 private:
     std::unordered_map<const char*, QProgressBar*> progressBars;
 };
 
-// Function to calculate image contours
-std::vector<std::complex<double>> calculateContours(const QImage& image) {
-    std::vector<std::complex<double>> contours;
-    const int THRESH = 128;
-
-    // Iterate through each pixel in the image
-    for (int y = 0; y < image.height(); ++y) {
-        for (int x = 0; x < image.width(); ++x) {
-            // Check if the pixel is part of the contour
-            if (qRed(image.pixel(x, y)) < THRESH) {
-                contours.emplace_back(x, y);
-            }
-        }
-    }
-
-    return contours;
-}
-
 // Function to apply FFT on 1D sequences without external libraries
-void fft(std::vector<std::complex<double>> &a) {
+void fft(std::vector<std::complex<double>>& a) {
     int n = a.size();
     if (n <= 1) {
         return;
     }
 
-    // Divide
-    std::vector<std::complex<double>> a0(a.begin(), a.begin() + n / 2);
-    std::vector<std::complex<double>> a1(a.begin() + n / 2, a.end());
+    // Divide the vector into even and odd parts
+    std::vector<std::complex<double>> even, odd;
+    for (int i = 0; i < n; i += 2) {
+        even.push_back(a[i]);
+        odd.push_back(a[i + 1]);
+    }
 
-    // Calculate halves
-    fft(a0);
-    fft(a1);
+    // Recursively compute FFT for even and odd parts
+    fft(even);
+    fft(odd);
 
-    // Combine
-    for (int i = 0; i < n / 2; ++i) {
-        std::complex<double> t = std::polar(1.0, -2.0 * M_PI * i / n) * a1[i];
-        a[i] = a0[i] + t;
-        a[i + n / 2] = a0[i] - t;
+    // Combine the results
+    for (int i = 0; i < n / 2; i++) {
+        std::complex<double> t = std::polar(1.0, -2.0 * M_PI * i / n) * odd[i];
+        a[i] = even[i] + t;
+        a[i + n / 2] = even[i] - t;
     }
 }
 
@@ -218,9 +211,9 @@ std::vector<double> applyFFT(const std::vector<std::complex<double>> &contours) 
     // Extract magnitude spectrum
     std::vector<double> spectrum(N);
     for (int i = 0; i < N; i++) {
+        // |z| = sqrt(real(z)^2 + imag(z)^2)
         spectrum[i] = std::abs(input[i]);
     }
-
     return spectrum;
 }
 
@@ -284,47 +277,195 @@ std::vector<uint8_t> readMNISTLabels(const char* filePath) {
     return labels;
 }
 
+// -------------- contour detection --------------
+
+QPainterPath detectContours(const QImage& binaryImage) {
+    QPainterPath contours;
+
+    for (int y = 0; y < binaryImage.height(); ++y) {
+        for (int x = 0; x < binaryImage.width(); ++x) {
+            // Check if the pixel is part of the object (black pixel in binary image)
+            if (qRed(binaryImage.pixel(x, y)) == 0) {
+                // Check neighbors to determine if it is on the boundary
+                bool isBoundary = false;
+
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        int nx = x + dx;
+                        int ny = y + dy;
+
+                        // Skip pixels outside the image boundary
+                        if (nx >= 0 && nx < binaryImage.width() && ny >= 0 && ny < binaryImage.height()) {
+                            // Check if the neighbor is outside the object (white pixel in binary image)
+                            if (qRed(binaryImage.pixel(nx, ny)) == 255) {
+                                isBoundary = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (isBoundary) break;
+                }
+
+                // If the pixel is on the boundary, add it to the contours
+                if (isBoundary) {
+                    contours.moveTo(x, y);
+                    contours.lineTo(x + 1, y + 1);
+                }
+            }
+        }
+    }
+
+    return contours;
+}
+
+std::vector<std::complex<double>> detectContoursV(const QImage& binaryImage) {
+    std::vector<std::complex<double>> contours;
+
+    for (int y = 0; y < binaryImage.height(); ++y) {
+        for (int x = 0; x < binaryImage.width(); ++x) {
+            // Check if the pixel is part of the object (black pixel in binary image)
+            if (qRed(binaryImage.pixel(x, y)) == 0) {
+                // Check neighbors to determine if it is on the boundary
+                bool isBoundary = false;
+
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        int nx = x + dx;
+                        int ny = y + dy;
+
+                        // Skip pixels outside the image boundary
+                        if (nx >= 0 && nx < binaryImage.width() && ny >= 0 && ny < binaryImage.height()) {
+                            // Check if the neighbor is outside the object (white pixel in binary image)
+                            if (qRed(binaryImage.pixel(nx, ny)) == 255) {
+                                isBoundary = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (isBoundary) break;
+                }
+
+                // If the pixel is on the boundary, add it to the contours
+                if (isBoundary) {
+                    contours.push_back(std::complex<double>(x, y));
+                }
+            }
+        }
+    }
+    return contours;
+}
+
+// Alias for a complex number representing a point in 2D space
+using Point = std::complex<double>;
+
+// Function to calculate the Euclidean distance between two points (complex numbers)
+double distance(const Point& p1, const Point& p2) {
+    // sqrt((p2.x - p1.x)^2 + (p2.y - p1.y)^2);
+    return std::abs(p2 - p1);
+}
+
+// Function to connect nearby contours
+void connectContours(std::vector<Point>& contours, double proximityThreshold) {
+    std::vector<Point> connectedContours;
+
+    for (size_t i = 0; i < contours.size(); ++i) {
+        size_t j = (i + 1) % contours.size(); // Circular index to connect the last point with the first
+        // Check if the endpoints of the two contours are close enough
+        if (distance(contours[i], contours[j]) < proximityThreshold) {
+            // Merge the two contours
+            connectedContours.insert(connectedContours.end(), contours.begin() + i, contours.begin() + j + 1);
+        }
+    }
+
+    contours = connectedContours;
+}
+
+// -------------- contour detection --------------
+
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
 
-    DownloadDialog downloadDialog({
-        "http://yann.lecun.com/exdb/mnist/train-images-idx3-ubyte.gz", //train imgs
-        "http://yann.lecun.com/exdb/mnist/train-labels-idx1-ubyte.gz", //train labels
-        "http://yann.lecun.com/exdb/mnist/t10k-images-idx3-ubyte.gz",  //test img
-        "http://yann.lecun.com/exdb/mnist/t10k-labels-idx1-ubyte.gz"   //test labels
-    });
-    downloadDialog.show();
-    downloadDialog.downloadAllAsync();
 
-    // Load MNIST dataset image (assuming a single digit image for simplicity)
-    const char* trainImages = "train-images-idx3-ubyte.gz";
-    const char* trainLabels = "train-labels-idx1-ubyte.gz";
+    // ------------------- contours experiment -----------------------
+    // Assuming you have a binary image (black and white)
+    QImage binaryImage("bin_img.jpeg");
+    QPainterPath contoursP = detectContours(binaryImage);
+    // TODO: try with and without connecting the contours to see which model performs better
+    std::vector<Point> contours = detectContoursV(binaryImage);
+    // Set the proximity threshold (adjust as needed)
+    // after a certain value (~20-30), it stops affecting the connections
+    double proximityThreshold = 25.0; // this is, essentially, a hyperparameter
+    // Connect nearby contours
+    connectContours(contours, proximityThreshold);
 
-    // Read gzipped MNIST images and labels
-    std::vector<std::vector<uint8_t>> images = readMNISTImages(trainImages);
-    std::vector<uint8_t> labels = readMNISTLabels(trainLabels);
-
-    for (const auto& imageBytes : images) {
-        // Create a QImage from the vector<uint8_t>
-        QImage image(imageBytes.data(), 28, 28, QImage::Format_Grayscale8);
-
-        // Calculate contours using the custom function
-        auto contours = calculateContours(image); //TODO: binarize before getting contours? (moore.cpp)
-
-        std::vector<double> spectrum = applyFFT(contours);
-
-        // Analyze coefficients and determine how much to cut
-
-        // Your analysis logic here
-        // You may analyze the spectrum to determine which high-frequency coefficients to cut
-
-        //accumulate train data somehow?
+    // Create a QPainterPath from the connected contours
+    QPainterPath connectedPath;
+    if (!contours.empty()) {
+        connectedPath.moveTo(contours.front().real(), contours.front().imag());
+        for (const auto& point : contours) {
+            connectedPath.lineTo(point.real(), point.imag());
+        }
     }
-    
-    // train a model?
-    
-    // test the model
 
+    // Create a QGraphicsScene and add the contours to it
+    QGraphicsScene scene;
+    scene.addPath(connectedPath);
+    // scene.addPath(contoursP);
+    // Create a QGraphicsView to display the scene
+    QGraphicsView view(&scene);
+    view.show();
+    // ------------------- contours experiment -----------------------
+
+
+    // qDebug() << "Downloading MNIST dataset files...";
+    // DownloadDialog downloadDialog({
+    //     "http://yann.lecun.com/exdb/mnist/train-images-idx3-ubyte.gz", //train images (60 000)
+    //     "http://yann.lecun.com/exdb/mnist/train-labels-idx1-ubyte.gz", //train labels
+    //     "http://yann.lecun.com/exdb/mnist/t10k-images-idx3-ubyte.gz",  //test images (10 000)
+    //     "http://yann.lecun.com/exdb/mnist/t10k-labels-idx1-ubyte.gz"   //test labels
+    // });
+    // downloadDialog.show();
+    // auto filePaths = downloadDialog.downloadAll();
+
+    // const char* trainImages = "train-images-idx3-ubyte.gz";
+    // const char* trainLabels = "train-labels-idx1-ubyte.gz";
+
+    // qDebug() << "Reading MNIST train dataset...";
+    // std::vector<std::vector<uint8_t>> images = readMNISTImages(trainImages);
+    // std::vector<uint8_t> labels = readMNISTLabels(trainLabels);
+
+    // for (const auto& imageBytes : images) {
+    //     // Create a QImage from the vector<uint8_t>
+    //     QImage image(imageBytes.data(), 28, 28, QImage::Format_Grayscale8);
+
+    //     // Calculate contours using the custom function
+    //     auto contours = detectContoursV(image); //TODO: binarize before getting contours?
+
+    //     std::vector<double> spectrum = applyFFT(contours);
+
+    //     // Analyze coefficients and determine how much to cut
+
+    //     // Your analysis logic here
+    //     // You may analyze the spectrum to determine which high-frequency coefficients to cut
+
+    //     //accumulate train data somehow?
+    // }
+    
+    // // train a model?
+    
+    // // test the model
+    
+    // // perform analysis on how much of the high frequencies we can remove 
+    // // until a certain accuracy regression threshold is reached 
+    // // (e.g. if the base model is 80% accurate, a 10% reduction is the cut-off point - get the difference in frequencies)
+
+    // qDebug() << "Cleaning up MNIST dataset files...";
+    // for (auto filePath : filePaths) {
+    //     std::remove(filePath.c_str());
+    // }
+    // downloadDialog.close();
     return app.exec();
 }
 

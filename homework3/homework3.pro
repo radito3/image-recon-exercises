@@ -18,8 +18,6 @@ QT += core network
 
 LIBS += -lz
 
-CONFIG += c++20
-
 # Input
 SOURCES += main.cpp
 
