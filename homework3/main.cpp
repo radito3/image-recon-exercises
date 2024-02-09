@@ -35,9 +35,13 @@
 #include <fstream>
 #include <filesystem>
 #include <vector>
+#include <bitset>
+#include <unordered_map>
 #include <complex>
 #include <cmath>
 #include <cstdio>
+#include <limits>
+#include <cstdlib>
 
 #include <zlib.h>
 
@@ -368,7 +372,7 @@ double distance(const Point& p1, const Point& p2) {
 }
 
 // Function to connect nearby contours
-void connectContours(std::vector<Point>& contours, double proximityThreshold) {
+void connectContours(std::vector<Point>& contours, double proximityThreshold = 25.0) {
     std::vector<Point> connectedContours;
 
     for (size_t i = 0; i < contours.size(); ++i) {
@@ -432,6 +436,300 @@ When analyzing the spectrum of a contour, high-frequency components could captur
 
 // -------------- analysis --------------------
 
+// --------------- image processing ---------------
+
+void to_gray(QImage& image) {
+    //tranformation coefficients from color to grayscale
+    const double red_coef = 0.2989,
+                 green_coef = 0.5870,
+                 blue_coef = 0.1140;
+    
+    for (int row_i = 0; row_i < image.height(); row_i++) {
+        QRgb* row_p = (QRgb*) image.scanLine(row_i);
+
+        for (int col_i = 0; col_i < image.width(); col_i++) {
+            auto pixel = row_p[col_i];
+            int red = qRed(pixel);
+            int green = qGreen(pixel);
+            int blue = qBlue(pixel);
+
+            int gray = red_coef * red + green_coef * green + blue_coef * blue;
+            row_p[col_i] = qRgb(gray, gray, gray);
+        }
+    }
+}
+
+// very small constant to compare floating-point numbers
+const double EPS = 1.0e-14;
+
+// gray-level intensity minimum and maximum
+const int INTENS_MIN = 0;
+const int INTENS_MAX = 255;
+
+// accumulate normalized histogram
+void calcHisto(const QImage &image, double histo[]) {
+    for (int i = 0; i <= INTENS_MAX; i++) {
+        histo[i] = 0;
+    }
+
+    for (int indx_row = 0; indx_row < image.height(); indx_row++) {
+        quint8* ptr_row = (quint8*)(image.bits() + indx_row * image.bytesPerLine());
+        for (int indx_col = 0; indx_col < image.width(); indx_col++) {
+            histo[ptr_row[indx_col]]++;
+        }
+    }
+
+    int numb_pix = image.height() * image.width();
+    for (int i = 0; i <= INTENS_MAX; i++) {
+        histo[i] /= numb_pix;
+    }
+}
+
+// apply threshold on a gray-scale image to calculate binary image
+void thresh(QImage &image, int thr) {
+    for (int indx_row = 0; indx_row < image.height(); indx_row++) {
+        quint8* ptr_row = (quint8*)(image.bits() + indx_row * image.bytesPerLine());
+        for (int indx_col = 0; indx_col < image.width(); indx_col++) {
+            ptr_row[indx_col] = (ptr_row[indx_col] < thr) ? INTENS_MIN : INTENS_MAX;
+        }
+    }
+}
+
+// Otsu's method
+int otsu(const double histo[]) {
+    // compute cumulative sums
+    double p_1[INTENS_MAX + 1] = {0};
+    p_1[0] = histo[0];
+    for (int i = 1; i <= INTENS_MAX; i++)
+    {
+        p_1[i] = p_1[i - 1] + histo[i];
+    }
+
+    // cumulative mean
+    double m[INTENS_MAX + 1] = {0};
+    for (int i = 1; i <= INTENS_MAX; i++)
+    {
+        m[i] = m[i - 1] + i * histo[i];
+    }
+
+    // global mean
+    double m_g = m[INTENS_MAX];
+
+    // between-class
+    double b_c[INTENS_MAX + 1] = {0};
+    for (int i = 1; i <= INTENS_MAX; i++)
+    {
+        double div = (p_1[i] * (1 - p_1[i]));
+        b_c[i] = 
+            fabs(div < EPS) ? 0 :
+            ((m_g * p_1[i] - m[i]) * (m_g * p_1[i] - m[i])) / div;
+    }
+
+    // find max
+    double max = 0;
+    int max_i = 0;
+    for (int i = 0; i <= INTENS_MAX; i++)
+    {
+        if (b_c[i] > max)
+        {
+            max = b_c[i];
+            max_i = i;
+        }
+    }
+
+    return max_i;
+}
+
+// convert a gray-scale image to binary image
+void toBinImage(QImage &image) {
+    if (image.format() == QImage::Format_Grayscale8) {
+        double histo[INTENS_MAX + 1];
+        calcHisto(image, histo);  
+        int th = otsu(histo);
+        thresh(image, th);
+    }
+}
+
+// --------------- image processing ---------------
+
+// --------------- classification ---------------
+
+// 0 % accuracy
+class GaussianNaiveBayes {
+public:
+    void train(const std::vector<std::vector<double>>& X, const std::vector<uint8_t>& y) {
+        // Separate data by class
+        separateByClass(X, y);
+
+        // Calculate mean and standard deviation for each class and feature
+        calculateClassStatistics();
+    }
+
+    uint8_t predict(const std::vector<double>& x) {
+        double maxProbability = -INFINITY;
+        uint8_t predictedClass = 0;
+
+        for (const auto& [currentClass, classStats] : classStatistics) {
+            double probability = calculateProbability(x, classStats.mean, classStats.stdev);
+
+            if (probability > maxProbability) {
+                maxProbability = probability;
+                predictedClass = currentClass;
+            }
+        }
+
+        return predictedClass;
+    }
+
+private:
+    struct ClassStatistics {
+        std::vector<double> mean;
+        std::vector<double> stdev;
+    };
+
+    std::unordered_map<uint8_t, ClassStatistics> classStatistics;
+
+    void separateByClass(const std::vector<std::vector<double>>& X, const std::vector<uint8_t>& y) {
+        for (size_t i = 0; i < X.size(); ++i) {
+            uint8_t label = y[i];
+            if (classStatistics.find(label) == classStatistics.end()) {
+                classStatistics[label] = ClassStatistics();
+            }
+
+            for (size_t j = 0; j < X[i].size(); ++j) {
+                classStatistics[label].mean.push_back(X[i][j]);
+            }
+        }
+    }
+
+    void calculateClassStatistics() {
+        for (auto& [currentClass, classStats] : classStatistics) {
+            qDebug() << "calculating for class" << currentClass;
+
+            size_t numSamples = classStats.mean.size() / classStatistics.size();
+
+            // Calculate mean
+            for (double& mean : classStats.mean) {
+                mean /= numSamples;
+            }
+
+            // Calculate standard deviation
+            for (size_t i = 0; i < numSamples; ++i) {
+                for (size_t j = 0; j < classStats.mean.size(); ++j) {
+                    double diff = classStatistics[currentClass].mean[j] - classStats.mean[j];
+                    classStats.stdev.push_back(diff * diff);
+                }
+            }
+
+            for (double& stdev : classStats.stdev) {
+                stdev = sqrt(stdev / numSamples);
+            }
+        }
+    }
+
+    double calculateProbability(const std::vector<double>& x, const std::vector<double>& mean, const std::vector<double>& stdev) {
+        double probability = 1.0;
+        for (size_t i = 0; i < x.size(); ++i) {
+            double exponent = exp(-((x[i] - mean[i]) * (x[i] - mean[i])) / (2 * stdev[i] * stdev[i]));
+            probability *= (1 / (sqrt(2 * M_PI) * stdev[i])) * exponent;
+        }
+        return probability;
+    }
+};
+
+// 0 % accuracy
+class NaiveBayesClassifier {
+private:
+    // Number of classes
+    uint8_t numClasses;
+
+    // Class-wise counts
+    std::vector<double> classCounts;
+
+    // Mean and variance per class and feature
+    std::vector<std::vector<std::pair<double, double>>> featureStats;
+
+public:
+    NaiveBayesClassifier(uint8_t numClasses) : numClasses(numClasses) {
+        classCounts.resize(numClasses, 0.0);
+        featureStats.resize(numClasses);
+    }
+
+    ~NaiveBayesClassifier() {
+        // Clear allocated memory
+        for (uint8_t c = 0; c < numClasses; ++c) {
+            featureStats[c].clear();
+        }
+    }
+
+    void train(const std::vector<std::vector<double>>& data, const std::vector<uint8_t>& labels) {
+        for (size_t i = 0; i < data.size(); ++i) {
+            uint8_t label = labels[i];
+            classCounts[label] += 1.0;
+
+            if (featureStats[label].empty()) {
+                featureStats[label].resize(data[i].size(), {0.0, 0.0});
+            }
+
+            for (size_t j = 0; j < data[i].size(); ++j) {
+                double featureValue = data[i][j];
+
+                // Update mean and variance (we'll use variance instead of stdev)
+                double& mean = featureStats[label][j].first;
+                double& variance = featureStats[label][j].second;
+
+                double delta = featureValue - mean;
+                mean += delta / classCounts[label];
+                variance += delta * (featureValue - mean);
+            }
+        }
+
+        // Calculate variance and handle cases where variance is zero
+        for (uint8_t c = 0; c < numClasses; ++c) {
+            for (size_t i = 0; i < featureStats[c].size(); ++i) {
+                double& variance = featureStats[c][i].second;
+                variance /= classCounts[c];
+                if (variance == 0.0) {
+                    // Add a small value to avoid division by zero in logProbability
+                    variance = std::numeric_limits<double>::epsilon();
+                }
+            }
+        }
+    }
+
+    double calculateLogProbability(double x, double mean, double variance) {
+        // Log probability density function of normal distribution
+        double exponent = -0.5 * pow((x - mean), 2) / variance;
+        return -0.5 * log(2 * M_PI * variance) + exponent;
+    }
+
+    uint8_t predict(const std::vector<double>& data) {
+        double maxLogProbability = -std::numeric_limits<double>::infinity();
+        uint8_t predictedClass = 0;
+
+        for (uint8_t c = 0; c < numClasses; ++c) {
+            double logProbability = log(classCounts[c] / data.size());  // Class prior
+
+            for (size_t i = 0; i < data.size(); ++i) {
+                if (i < featureStats[c].size()) {
+                    double mean = featureStats[c][i].first;
+                    double variance = featureStats[c][i].second;
+                    logProbability += calculateLogProbability(data[i], mean, variance);
+                }
+            }
+
+            if (logProbability > maxLogProbability) {
+                maxLogProbability = logProbability;
+                predictedClass = c;
+            }
+        }
+
+        return predictedClass;
+    }
+};
+
+// --------------- classification ---------------
+
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
 
@@ -476,37 +774,67 @@ int main(int argc, char *argv[]) {
     downloadDialog.show();
     auto filePaths = downloadDialog.downloadAll();
 
-    const char* trainImages = "train-images-idx3-ubyte.gz";
-    const char* trainLabels = "train-labels-idx1-ubyte.gz";
+    const char* trainImagesFile = "train-images-idx3-ubyte.gz";
+    const char* trainLabelsFile = "train-labels-idx1-ubyte.gz";
+    const char* testImagesFile = "t10k-images-idx3-ubyte.gz";
+    const char* testLabelsFile = "t10k-labels-idx1-ubyte.gz";
 
     qDebug() << "Reading MNIST train dataset...";
-    std::vector<std::vector<uint8_t>> images = readMNISTImages(trainImages);
-    std::vector<uint8_t> labels = readMNISTLabels(trainLabels);
+    std::vector<std::vector<uint8_t>> trainImages = readMNISTImages(trainImagesFile);
+    std::vector<uint8_t> trainLabels = readMNISTLabels(trainLabelsFile);
+    std::vector<std::vector<uint8_t>> testImages = readMNISTImages(testImagesFile);
+    std::vector<uint8_t> testLabels = readMNISTLabels(testLabelsFile);
 
-    for (const auto& imageBytes : images) {
+    qDebug() << "computing image contours and their magnitude spectrums...";
+    std::vector<std::vector<double>> trainData(trainImages.size() / 12);
+    for (size_t i = 0; i < trainImages.size() / 12; ++i) {
         // Create a QImage from the vector<uint8_t>
-        QImage image(imageBytes.data(), 28, 28, QImage::Format_Grayscale8);
+        QImage image(trainImages[i].data(), 28, 28, QImage::Format_Grayscale8);
+        if (!image.allGray()) {
+            to_gray(image);
+        }
+        QImage grayImage = image.convertToFormat(QImage::Format_Grayscale8);
+        toBinImage(grayImage);
+        auto contours = detectContoursV(grayImage);
+        std::vector<double> magnituteSpectrum = applyFFT(contours);
+        trainData[i] = magnituteSpectrum;
+    }
+  
+    qDebug() << "creating classifier";
+    GaussianNaiveBayes classifier;
 
-        auto contours = detectContoursV(image);
+    qDebug() << "training...";
+    classifier.train(trainData, trainLabels);
 
+    qDebug() << "testing...";
+    std::bitset<10000> guesses;
+    for (size_t i = 0; i < testImages.size(); ++i) {
+        // Create a QImage from the vector<uint8_t>
+        QImage image(testImages[i].data(), 28, 28, QImage::Format_Grayscale8);
+        if (!image.allGray()) {
+            to_gray(image);
+        }
+        QImage grayImage = image.convertToFormat(QImage::Format_Grayscale8);
+        toBinImage(grayImage);
+        auto contours = detectContoursV(grayImage);
         std::vector<double> magnituteSpectrum = applyFFT(contours);
 
-        // You may analyze the spectrum to determine which high-frequency coefficients (values in the spectrum) to cut
-
-        //accumulate train data somehow?
+        uint8_t predictedClass = classifier.predict(magnituteSpectrum);
+        guesses.set(i, testLabels[i] == predictedClass);
     }
-    
-    // train a model? - maybe the training needs to make associations between the magnitute spectrum of an image's contours with its label
-    // that way we can have a direct impact on its performance when removing high frequencies
-    
-    // test the model
+
+    qDebug() << "correct" << guesses.count() << "out of" << testLabels.size();
+
+    // shave off high frequencies and observe the change in accuracy
 
     qDebug() << "Cleaning up MNIST dataset files...";
     for (auto filePath : filePaths) {
         std::remove(filePath.c_str());
     }
     downloadDialog.close();
-    return app.exec();
+    // qDebug() << "elems" << QApplication::topLevelWidgets();
+    app.quit();
+    return 0;
 }
 
 #include "main.moc"
