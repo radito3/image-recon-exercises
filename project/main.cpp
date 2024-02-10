@@ -19,189 +19,14 @@
 #include <cmath>
 #include <complex>
 
-// ----------------- edge detection -----------------
+// ----------------- segmentation -----------------
 
-// Function to apply Gaussian blur to the image
-QImage applyGaussianBlur(const QImage &inputImage, int kernelSize, double sigma) {
-    QImage outputImage = inputImage;
+// very small constant to compare floating-point numbers
+const double EPS = 1.0e-14;
 
-    int halfKernelSize = kernelSize / 2;
-    int width = inputImage.width();
-    int height = inputImage.height();
-
-    // Create a 2D kernel for Gaussian blur
-    double **kernel = new double*[kernelSize];
-    for (int i = 0; i < kernelSize; ++i) {
-        kernel[i] = new double[kernelSize];
-    }
-
-    // Populate the kernel values based on Gaussian function
-    for (int i = -halfKernelSize; i <= halfKernelSize; ++i) {
-        for (int j = -halfKernelSize; j <= halfKernelSize; ++j) {
-            kernel[i + halfKernelSize][j + halfKernelSize] =
-                exp(-(i * i + j * j) / (2 * sigma * sigma)) / (2 * M_PI * sigma * sigma);
-        }
-    }
-
-    // Normalize the kernel
-    double sum = 0.0;
-    for (int i = 0; i < kernelSize; ++i) {
-        for (int j = 0; j < kernelSize; ++j) {
-            sum += kernel[i][j];
-        }
-    }
-
-    for (int i = 0; i < kernelSize; ++i) {
-        for (int j = 0; j < kernelSize; ++j) {
-            kernel[i][j] /= sum;
-        }
-    }
-
-    // Apply the Gaussian blur to the image
-    for (int y = halfKernelSize; y < height - halfKernelSize; ++y) {
-        for (int x = halfKernelSize; x < width - halfKernelSize; ++x) {
-            double sumR = 0.0, sumG = 0.0, sumB = 0.0;
-
-            for (int i = -halfKernelSize; i <= halfKernelSize; ++i) {
-                for (int j = -halfKernelSize; i <= halfKernelSize; ++i) {
-                    QRgb pixel = inputImage.pixel(x + j, y + i);
-                    sumR += qRed(pixel) * kernel[i + halfKernelSize][j + halfKernelSize];
-                    sumG += qGreen(pixel) * kernel[i + halfKernelSize][j + halfKernelSize];
-                    sumB += qBlue(pixel) * kernel[i + halfKernelSize][j + halfKernelSize];
-                }
-            }
-
-            outputImage.setPixel(x, y, qRgb(static_cast<int>(sumR), static_cast<int>(sumG), static_cast<int>(sumB)));
-        }
-    }
-
-    // Clean up memory
-    for (int i = 0; i < kernelSize; ++i) {
-        delete[] kernel[i];
-    }
-    delete[] kernel;
-
-    return outputImage;
-}
-
-// Function to compute gradients using Sobel operators
-void computeGradients(const QImage &inputImage, QImage &gradientMagnitude, QImage &gradientDirection) {
-    int width = inputImage.width();
-    int height = inputImage.height();
-
-    gradientMagnitude = QImage(width, height, QImage::Format_Grayscale8);
-    gradientDirection = QImage(width, height, QImage::Format_Grayscale8);
-
-    for (int y = 1; y < height - 1; ++y) {
-        for (int x = 1; x < width - 1; ++x) {
-            int gx = qGray(inputImage.pixel(x + 1, y - 1)) + 2 * qGray(inputImage.pixel(x + 1, y)) + qGray(inputImage.pixel(x + 1, y + 1))
-                     - qGray(inputImage.pixel(x - 1, y - 1)) - 2 * qGray(inputImage.pixel(x - 1, y)) - qGray(inputImage.pixel(x - 1, y + 1));
-
-            int gy = qGray(inputImage.pixel(x - 1, y + 1)) + 2 * qGray(inputImage.pixel(x, y + 1)) + qGray(inputImage.pixel(x + 1, y + 1))
-                     - qGray(inputImage.pixel(x - 1, y - 1)) - 2 * qGray(inputImage.pixel(x, y - 1)) - qGray(inputImage.pixel(x + 1, y - 1));
-
-            int magnitude = static_cast<int>(sqrt(gx * gx + gy * gy));
-            gradientMagnitude.setPixel(x, y, qRgb(magnitude, magnitude, magnitude));
-
-            double direction = atan2(gy, gx) * 180.0 / M_PI;
-            gradientDirection.setPixel(x, y, qRgb(static_cast<int>(direction), static_cast<int>(direction), static_cast<int>(direction)));
-        }
-    }
-}
-
-// Function for non-maximum suppression
-void nonMaximumSuppression(const QImage &gradientMagnitude, const QImage &gradientDirection, QImage &outputImage) {
-    int width = gradientMagnitude.width();
-    int height = gradientMagnitude.height();
-
-    outputImage = QImage(width, height, QImage::Format_Grayscale8);
-
-    for (int y = 1; y < height - 1; ++y) {
-        for (int x = 1; x < width - 1; ++x) {
-            int mag = qRed(gradientMagnitude.pixel(x, y));
-
-            int angle = qRed(gradientDirection.pixel(x, y));
-            angle = (angle < 0) ? angle + 180 : angle;
-
-            int pixel1, pixel2;
-
-            // Determine the pixels to compare based on the gradient direction
-            if ((angle >= 0 && angle < 22.5) || (angle >= 157.5 && angle <= 180)) {
-                pixel1 = qRed(gradientMagnitude.pixel(x + 1, y));
-                pixel2 = qRed(gradientMagnitude.pixel(x - 1, y));
-            } else if (angle >= 22.5 && angle < 67.5) {
-                pixel1 = qRed(gradientMagnitude.pixel(x + 1, y - 1));
-                pixel2 = qRed(gradientMagnitude.pixel(x - 1, y + 1));
-            } else if (angle >= 67.5 && angle < 112.5) {
-                pixel1 = qRed(gradientMagnitude.pixel(x, y - 1));
-                pixel2 = qRed(gradientMagnitude.pixel(x, y + 1));
-            } else {  // angle >= 112.5 && angle < 157.5
-                pixel1 = qRed(gradientMagnitude.pixel(x - 1, y - 1));
-                pixel2 = qRed(gradientMagnitude.pixel(x + 1, y + 1));
-            }
-
-            // Perform non-maximum suppression
-            if (mag >= pixel1 && mag >= pixel2) {
-                outputImage.setPixel(x, y, qRgb(mag, mag, mag));
-            } else {
-                outputImage.setPixel(x, y, qRgb(0, 0, 0));
-            }
-        }
-    }
-}
-
-// Function for edge tracking by hysteresis
-void edgeTrackingByHysteresis(const QImage &inputImage, QImage &outputImage, double lowThreshold, double highThreshold) {
-    int width = inputImage.width();
-    int height = inputImage.height();
-
-    outputImage = QImage(width, height, QImage::Format_Grayscale8);
-
-    // Define weak and strong edge intensity values
-    int weakEdge = 50;
-    int strongEdge = 255;
-
-    // Initialize the output image with weak edges
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            if (qRed(inputImage.pixel(x, y)) > lowThreshold) {
-                outputImage.setPixel(x, y, qRgb(weakEdge, weakEdge, weakEdge));
-            } else {
-                outputImage.setPixel(x, y, qRgb(0, 0, 0));
-            }
-        }
-    }
-
-    // Identify strong edges based on the high threshold
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            if (qRed(inputImage.pixel(x, y)) > highThreshold) {
-                outputImage.setPixel(x, y, qRgb(strongEdge, strongEdge, strongEdge));
-            }
-        }
-    }
-
-    // Perform edge tracking by hysteresis
-    for (int y = 1; y < height - 1; ++y) {
-        for (int x = 1; x < width - 1; ++x) {
-            if (qRed(outputImage.pixel(x, y)) == weakEdge) {
-                // Check neighboring pixels for strong edges
-                for (int i = -1; i <= 1; ++i) {
-                    for (int j = -1; j <= 1; ++j) {
-                        if (qRed(outputImage.pixel(x + j, y + i)) == strongEdge) {
-                            outputImage.setPixel(x, y, qRgb(strongEdge, strongEdge, strongEdge));
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-// ----------------- edge detection -----------------
-
-// ---- util ----
+// gray-level intensity minimum and maximum
+const int INTENS_MIN = 0;
+const int INTENS_MAX = 255;
 
 void to_gray(QImage& image) {
     //tranformation coefficients from color to grayscale
@@ -223,17 +48,6 @@ void to_gray(QImage& image) {
         }
     }
 }
-
-// ---- util ----
-
-// ----------------- binarization -----------------
-
-// very small constant to compare floating-point numbers
-const double EPS = 1.0e-14;
-
-// gray-level intensity minimum and maximum
-const int INTENS_MIN = 0;
-const int INTENS_MAX = 255;
 
 // accumulate normalized histogram
 void calcHisto(const QImage &image, double histo[]) {
@@ -319,88 +133,6 @@ void toBinImage(QImage &image) {
     }
 }
 
-// ----------------- binarization -----------------
-
-// ----------------- segmentation -----------------
-
-void depthFirstSearch(const QImage &binaryImage, std::vector<std::vector<int>> &labeledImage, int x, int y, int label) {
-    if (x < 0 || x >= binaryImage.width() || y < 0 || y >= binaryImage.height())
-        return;
-
-    if (binaryImage.pixelColor(x, y).black() == 1 && labeledImage[y][x] == 0) {
-        labeledImage[y][x] = label;
-
-        depthFirstSearch(binaryImage, labeledImage, x - 1, y - 1, label);
-        depthFirstSearch(binaryImage, labeledImage, x, y - 1, label);
-        depthFirstSearch(binaryImage, labeledImage, x + 1, y - 1, label);
-        depthFirstSearch(binaryImage, labeledImage, x - 1, y, label);
-        depthFirstSearch(binaryImage, labeledImage, x + 1, y, label);
-        depthFirstSearch(binaryImage, labeledImage, x - 1, y + 1, label);
-        depthFirstSearch(binaryImage, labeledImage, x, y + 1, label);
-        depthFirstSearch(binaryImage, labeledImage, x + 1, y + 1, label);
-    }
-}
-
-int connectedComponentAnalysis(const QImage &binaryImage, std::vector<std::vector<int>> &labeledImage) {
-    labeledImage.resize(binaryImage.height(), std::vector<int>(binaryImage.width(), 0));
-    int label = 0;
-
-    for (int y = 0; y < binaryImage.height(); ++y) {
-        for (int x = 0; x < binaryImage.width(); ++x) {
-            if (binaryImage.pixelColor(x, y).black() == 1 && labeledImage[y][x] == 0) {
-                label++;
-                depthFirstSearch(binaryImage, labeledImage, x, y, label);
-            }
-        }
-    }
-
-    return label;
-}
-
-QImage generateSegmentedImage(const QImage &binaryImage, const std::vector<std::vector<int>> &labeledImage, int numLabels) {
-    QImage segmented(binaryImage.size(), QImage::Format_RGB32);
-    std::vector<QColor> labelColors(numLabels);
-
-    for (int i = 0; i < numLabels; ++i) {
-        labelColors[i] = QColor::fromRgb(QRandomGenerator::global()->bounded(0, 256) % 256,
-                                         QRandomGenerator::global()->bounded(0, 256) % 256, 
-                                         QRandomGenerator::global()->bounded(0, 256) % 256);
-    }
-
-    for (int y = 0; y < binaryImage.height(); ++y) {
-        for (int x = 0; x < binaryImage.width(); ++x) {
-            int label = labeledImage[y][x];
-            QColor color = label > 0 ? labelColors[label - 1] : QColor(Qt::white); // Set background to white
-            segmented.setPixelColor(x, y, color);
-        }
-    }
-
-    return segmented;
-}
-
-QImage segmentForegroundBackground(const QImage &inputImage, int threshold = 128) {
-    int width = inputImage.width();
-    int height = inputImage.height();
-
-    QImage outputImage = QImage(width, height, QImage::Format_Mono);
-
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            // Get the pixel color (0 or 1 for binary image)
-            QRgb pixelColor = inputImage.pixel(x, y);
-            int value = qRed(pixelColor);
-
-            // Apply thresholding to segment foreground from background
-            if (value > threshold) {
-                outputImage.setPixel(x, y, 1); // Foreground
-            } else {
-                outputImage.setPixel(x, y, 0); // Background
-            }
-        }
-    }
-    return outputImage;
-}
-
 // ----------------- segmentation -----------------
 
 class ImageViewer : public QWidget {
@@ -408,7 +140,7 @@ class ImageViewer : public QWidget {
 
 public:
     ImageViewer(QWidget *parent = nullptr) 
-        : QWidget(parent), isImageDisplayed(false), isSelectingRect(false)
+        : QWidget(parent), isImageDisplayed(false), isSelectingRect(false), isImageSegmented(false)
     {
         setupUi();
     }
@@ -449,6 +181,7 @@ private slots:
         if (!imagePath.isEmpty()) {
             displayImage(imagePath);
         }
+        isImageSegmented = false;
     }
 
     void startCrop() {
@@ -456,8 +189,17 @@ private slots:
         imageLabel->setCursor(Qt::CrossCursor);
     }
 
+    void showSegmentedImage() {
+        if (!isImageSegmented) {
+            isImageSegmented = true;
+            QImage binImage = transformImage(this->image);
+            imageLabel->setPixmap(QPixmap::fromImage(binImage));
+        }
+    }
+
     void finishCrop() {
         isSelectingRect = false;
+        isImageSegmented = false;
         imageLabel->setCursor(Qt::ArrowCursor);
 
         // Ensure the region of interest QRect is within the image bounds
@@ -467,7 +209,6 @@ private slots:
 
         QImage binaryImg = transformImage(procssingImg);
 
-        // TODO: maybe apply a gaussian filter before contour detection as it is a bit inaccurate
         auto contours = detectContours(binaryImg);
 
         // draw contours over the original image
@@ -553,10 +294,11 @@ private:
             isImageDisplayed = true;
             cropButton = new QPushButton("Select region", this);
             layout->addWidget(cropButton);
+            segmentButton = new QPushButton("Segment image", this);
+            layout->addWidget(segmentButton);
 
             connect(cropButton, &QPushButton::clicked, this, &ImageViewer::startCrop);
-
-            // TODO: add button for segmentation of foreground and background
+            connect(segmentButton, &QPushButton::clicked, this, &ImageViewer::showSegmentedImage);
         }
     }
 
@@ -568,11 +310,6 @@ private:
         QImage grayImage = copy.convertToFormat(QImage::Format_Grayscale8);
         toBinImage(grayImage);
         return grayImage;
-        // return segmentForegroundBackground(grayImage);
-
-        // std::vector<std::vector<int>> labeledImage;
-        // int numLabels = connectedComponentAnalysis(grayImage, labeledImage);
-        // return generateSegmentedImage(grayImage, labeledImage, numLabels);
     }
 
     QPoint origin;
@@ -585,31 +322,14 @@ private:
 
     bool isImageDisplayed;
     QPushButton *cropButton;
+    QPushButton *segmentButton;
     bool isSelectingRect;
     QRect selectionRect;
+    bool isImageSegmented;
 };
 
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
-
-    // first 3 steps are uneccessary for the MNIST dataset, as the images are very small and do not have much noise
-
-    // Step 1: Apply Gaussian blur
-    // QImage blurredImage = applyGaussianBlur(inputImage, 5, 1.0);
-
-    // Step 2: Compute gradients
-    // QImage gradientMagnitude, gradientDirection;
-    // computeGradients(inputImage, gradientMagnitude, gradientDirection);
-
-    // Step 3: Non-maximum suppression
-    // QImage nonMaxSuppression;
-    // nonMaximumSuppression(gradientMagnitude, gradientDirection, nonMaxSuppression);
-
-    // Step 4: Edge tracking by hysteresis
-    // QImage finalEdges;
-    // edgeTrackingByHysteresis(inputImage, /*nonMaxSuppression,*/ finalEdges, 70.0, 200.0);
-
-    // finalEdges.save("output.jpg");
 
     ImageViewer viewer;
     viewer.show();
