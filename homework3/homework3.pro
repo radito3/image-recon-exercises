@@ -16,7 +16,11 @@ QT += gui
 QT += widgets
 QT += core network
 
+INCLUDEPATH += /opt/homebrew/include/
+
 LIBS += -lz
+LIBS += -L/opt/homebrew/lib
+LIBS += -lfftw3 -lm
 
 # Input
 SOURCES += main.cpp

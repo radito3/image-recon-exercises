@@ -4,6 +4,8 @@
 *   QT += widgets
 *   QT += core network
 *   LIBS += -lz
+*   LIBS += -L/path/to/lib/fftw3
+*   LIBS += -lfftw3
 *   
 * Optionally:
 *   MOC_DIR = $$OUT_PWD/moc
@@ -31,9 +33,10 @@
 
 #include <initializer_list>
 #include <unordered_map>
-// #include <iostream>
+#include <iostream>
 #include <fstream>
 #include <filesystem>
+#include <algorithm>
 #include <vector>
 #include <bitset>
 #include <unordered_map>
@@ -44,6 +47,7 @@
 #include <cstdlib>
 
 #include <zlib.h>
+#include <fftw3.h>
 
 class FileDownloader : public QObject {
     Q_OBJECT
@@ -179,47 +183,30 @@ private:
     std::unordered_map<const char*, QProgressBar*> progressBars;
 };
 
-void fft(std::vector<std::complex<double>>& a) {
-    int n = a.size();
-    if (n <= 1) {
-        return;
+void fftWithHighFreqCut(std::vector<std::complex<double>>& input, int numHighFreqToCut = 0) {
+    int size = static_cast<int>(input.size());
+    fftw_complex* in = reinterpret_cast<fftw_complex*>(input.data());
+
+    fftw_plan plan = fftw_plan_dft_1d(size, in, in, FFTW_FORWARD, FFTW_ESTIMATE);
+
+    fftw_execute(plan);
+
+    // apply high-frequency filter (remove N highest frequencies)
+    for (int i = size - numHighFreqToCut; i < size; ++i) {
+        in[i][0] = 0.0; // real part
+        in[i][1] = 0.0; // imaginary part
     }
 
-    // Divide the vector into even and odd parts
-    std::vector<std::complex<double>> even, odd;
-    for (int i = 0; i < n; i += 2) {
-        even.push_back(a[i]);
-        odd.push_back(a[i + 1]);
+    plan = fftw_plan_dft_1d(size, in, in, FFTW_BACKWARD, FFTW_ESTIMATE);
+
+    fftw_execute(plan);
+
+    // return to original scaling (the inverse transform scales the elements by the size of input)
+    for (auto& el : input) {
+        el /= size;
     }
 
-    // Recursively compute FFT for even and odd parts
-    fft(even);
-    fft(odd);
-
-    // Combine the results
-    for (int i = 0; i < n / 2; i++) {
-        // std::polar(r, theta) r - magnitude, theta - phase angle
-        // essentially -> std::complex(r * cos(theta), r * sin(theta))
-        std::complex<double> t = std::polar(1.0, -2.0 * M_PI * i / n) * odd[i];
-        a[i] = even[i] + t;
-        a[i + n / 2] = even[i] - t;
-    }
-}
-
-// Function to apply FFT on 1D sequences and return magnitude spectrum
-std::vector<double> applyFFT(const std::vector<std::complex<double>> &contours) {
-    int N = contours.size();
-    std::vector<std::complex<double>> input = contours;
-
-    fft(input);
-
-    // Extract magnitude spectrum
-    std::vector<double> spectrum(N);
-    for (int i = 0; i < N; i++) {
-        // |z| = sqrt(real(z)^2 + imag(z)^2)
-        spectrum[i] = std::abs(input[i]);
-    }
-    return spectrum;
+    fftw_destroy_plan(plan);
 }
 
 // read gzipped MNIST images
@@ -284,47 +271,7 @@ std::vector<uint8_t> readMNISTLabels(const char* filePath) {
 
 // -------------- contour detection --------------
 
-QPainterPath detectContours(const QImage& binaryImage) {
-    QPainterPath contours;
-
-    for (int y = 0; y < binaryImage.height(); ++y) {
-        for (int x = 0; x < binaryImage.width(); ++x) {
-            // Check if the pixel is part of the object (black pixel in binary image)
-            if (qRed(binaryImage.pixel(x, y)) == 0) {
-                // Check neighbors to determine if it is on the boundary
-                bool isBoundary = false;
-
-                for (int dy = -1; dy <= 1; ++dy) {
-                    for (int dx = -1; dx <= 1; ++dx) {
-                        int nx = x + dx;
-                        int ny = y + dy;
-
-                        // Skip pixels outside the image boundary
-                        if (nx >= 0 && nx < binaryImage.width() && ny >= 0 && ny < binaryImage.height()) {
-                            // Check if the neighbor is outside the object (white pixel in binary image)
-                            if (qRed(binaryImage.pixel(nx, ny)) == 255) {
-                                isBoundary = true;
-                                break;
-                            }
-                        }
-                    }
-
-                    if (isBoundary) break;
-                }
-
-                // If the pixel is on the boundary, add it to the contours
-                if (isBoundary) {
-                    contours.moveTo(x, y);
-                    contours.lineTo(x + 1, y + 1);
-                }
-            }
-        }
-    }
-
-    return contours;
-}
-
-std::vector<std::complex<double>> detectContoursV(const QImage& binaryImage) {
+std::vector<std::complex<double>> detectContours(const QImage& binaryImage) {
     std::vector<std::complex<double>> contours;
 
     for (int y = 0; y < binaryImage.height(); ++y) {
@@ -365,13 +312,12 @@ std::vector<std::complex<double>> detectContoursV(const QImage& binaryImage) {
 // Alias for a complex number representing a point in 2D space
 using Point = std::complex<double>;
 
-// Function to calculate the Euclidean distance between two points (complex numbers)
+// Calculate the Euclidean distance between two points (complex numbers)
 double distance(const Point& p1, const Point& p2) {
     // sqrt((p2.x - p1.x)^2 + (p2.y - p1.y)^2);
     return std::abs(p2 - p1);
 }
 
-// Function to connect nearby contours
 void connectContours(std::vector<Point>& contours, double proximityThreshold = 25.0) {
     std::vector<Point> connectedContours;
 
@@ -388,53 +334,6 @@ void connectContours(std::vector<Point>& contours, double proximityThreshold = 2
 }
 
 // -------------- contour detection --------------
-
-// -------------- analysis --------------------
-
-// this might only need be done for the test dataset?
-// as in, after the model has been trained:
-//  - check its base accuracy
-//  - get the high frequencies and start removing them (tune the peak threshold) from contours spectrum
-//  - until a certain accuracy regression threshold is reached 
-//      (e.g. if the base model is 80% accurate, a 10% reduction is the cut-off point - get the difference in frequencies)
-// the result of the experiment would be the number of high frequencies removed and their threshold (in findPeaks) for the
-// configured accuracy regression cut-off point (might be a program parameter)
-
-std::vector<size_t> findPeaks(const std::vector<double>& spectrum, double threshold = 0.5) {
-    std::vector<size_t> peaks;
-    for (size_t i = 1; i < spectrum.size() - 1; ++i) {
-        // the threshold is also a hyperparameter -> tune it for best results
-        if (spectrum[i] > spectrum[i - 1] && spectrum[i] > spectrum[i + 1] && spectrum[i] > threshold) {
-            peaks.push_back(i);
-        }
-    }
-    return peaks; // elements are indicies in the magnitute spectrum vector, pointing to the coefficients
-}
-
-/*
-    std::cout << "Dominant Frequencies:\n";
-    for (size_t peakIndex : peakIndices) {
-        // Frequency calculation: peakIndex / N, where N is the size of the spectrum
-        double frequency = static_cast<double>(peakIndex) / spectrum.size();
-        std::cout << "Frequency: " << frequency << " Hz, Magnitude: " << spectrum[peakIndex] << "\n";
-    }
-*/
-
-/*
-"high" frequencies would correspond to components in the spectrum with higher magnitudes.
- These high-magnitude components represent the presence of rapid changes or variations in the contour.
-
-general guideline for interpreting frequency components in a spectrum:
- - Low frequencies: Correspond to slowly changing or smooth variations in the signal.
- - High frequencies: Correspond to rapid changes or abrupt transitions in the signal.
-
-When analyzing the spectrum of a contour, high-frequency components could capture details such as sharp corners,
- small details, or irregularities in the contour. By identifying and analyzing these high-frequency components,
-  you may gain insights into the detailed structure of the contour.
-
-*/
-
-// -------------- analysis --------------------
 
 // --------------- image processing ---------------
 
@@ -552,217 +451,23 @@ void toBinImage(QImage &image) {
 
 // --------------- image processing ---------------
 
-// --------------- classification ---------------
-
-// 0 % accuracy
-class GaussianNaiveBayes {
-public:
-    void train(const std::vector<std::vector<double>>& X, const std::vector<uint8_t>& y) {
-        // Separate data by class
-        separateByClass(X, y);
-
-        // Calculate mean and standard deviation for each class and feature
-        calculateClassStatistics();
-    }
-
-    uint8_t predict(const std::vector<double>& x) {
-        double maxProbability = -INFINITY;
-        uint8_t predictedClass = 0;
-
-        for (const auto& [currentClass, classStats] : classStatistics) {
-            double probability = calculateProbability(x, classStats.mean, classStats.stdev);
-
-            if (probability > maxProbability) {
-                maxProbability = probability;
-                predictedClass = currentClass;
-            }
-        }
-
-        return predictedClass;
-    }
-
-private:
-    struct ClassStatistics {
-        std::vector<double> mean;
-        std::vector<double> stdev;
-    };
-
-    std::unordered_map<uint8_t, ClassStatistics> classStatistics;
-
-    void separateByClass(const std::vector<std::vector<double>>& X, const std::vector<uint8_t>& y) {
-        for (size_t i = 0; i < X.size(); ++i) {
-            uint8_t label = y[i];
-            if (classStatistics.find(label) == classStatistics.end()) {
-                classStatistics[label] = ClassStatistics();
-            }
-
-            for (size_t j = 0; j < X[i].size(); ++j) {
-                classStatistics[label].mean.push_back(X[i][j]);
-            }
-        }
-    }
-
-    void calculateClassStatistics() {
-        for (auto& [currentClass, classStats] : classStatistics) {
-            qDebug() << "calculating for class" << currentClass;
-
-            size_t numSamples = classStats.mean.size() / classStatistics.size();
-
-            // Calculate mean
-            for (double& mean : classStats.mean) {
-                mean /= numSamples;
-            }
-
-            // Calculate standard deviation
-            for (size_t i = 0; i < numSamples; ++i) {
-                for (size_t j = 0; j < classStats.mean.size(); ++j) {
-                    double diff = classStatistics[currentClass].mean[j] - classStats.mean[j];
-                    classStats.stdev.push_back(diff * diff);
-                }
-            }
-
-            for (double& stdev : classStats.stdev) {
-                stdev = sqrt(stdev / numSamples);
-            }
-        }
-    }
-
-    double calculateProbability(const std::vector<double>& x, const std::vector<double>& mean, const std::vector<double>& stdev) {
-        double probability = 1.0;
-        for (size_t i = 0; i < x.size(); ++i) {
-            double exponent = exp(-((x[i] - mean[i]) * (x[i] - mean[i])) / (2 * stdev[i] * stdev[i]));
-            probability *= (1 / (sqrt(2 * M_PI) * stdev[i])) * exponent;
-        }
-        return probability;
-    }
-};
-
-// 0 % accuracy
-class NaiveBayesClassifier {
-private:
-    // Number of classes
-    uint8_t numClasses;
-
-    // Class-wise counts
-    std::vector<double> classCounts;
-
-    // Mean and variance per class and feature
-    std::vector<std::vector<std::pair<double, double>>> featureStats;
-
-public:
-    NaiveBayesClassifier(uint8_t numClasses) : numClasses(numClasses) {
-        classCounts.resize(numClasses, 0.0);
-        featureStats.resize(numClasses);
-    }
-
-    ~NaiveBayesClassifier() {
-        // Clear allocated memory
-        for (uint8_t c = 0; c < numClasses; ++c) {
-            featureStats[c].clear();
-        }
-    }
-
-    void train(const std::vector<std::vector<double>>& data, const std::vector<uint8_t>& labels) {
-        for (size_t i = 0; i < data.size(); ++i) {
-            uint8_t label = labels[i];
-            classCounts[label] += 1.0;
-
-            if (featureStats[label].empty()) {
-                featureStats[label].resize(data[i].size(), {0.0, 0.0});
-            }
-
-            for (size_t j = 0; j < data[i].size(); ++j) {
-                double featureValue = data[i][j];
-
-                // Update mean and variance (we'll use variance instead of stdev)
-                double& mean = featureStats[label][j].first;
-                double& variance = featureStats[label][j].second;
-
-                double delta = featureValue - mean;
-                mean += delta / classCounts[label];
-                variance += delta * (featureValue - mean);
-            }
-        }
-
-        // Calculate variance and handle cases where variance is zero
-        for (uint8_t c = 0; c < numClasses; ++c) {
-            for (size_t i = 0; i < featureStats[c].size(); ++i) {
-                double& variance = featureStats[c][i].second;
-                variance /= classCounts[c];
-                if (variance == 0.0) {
-                    // Add a small value to avoid division by zero in logProbability
-                    variance = std::numeric_limits<double>::epsilon();
-                }
-            }
-        }
-    }
-
-    double calculateLogProbability(double x, double mean, double variance) {
-        // Log probability density function of normal distribution
-        double exponent = -0.5 * pow((x - mean), 2) / variance;
-        return -0.5 * log(2 * M_PI * variance) + exponent;
-    }
-
-    uint8_t predict(const std::vector<double>& data) {
-        double maxLogProbability = -std::numeric_limits<double>::infinity();
-        uint8_t predictedClass = 0;
-
-        for (uint8_t c = 0; c < numClasses; ++c) {
-            double logProbability = log(classCounts[c] / data.size());  // Class prior
-
-            for (size_t i = 0; i < data.size(); ++i) {
-                if (i < featureStats[c].size()) {
-                    double mean = featureStats[c][i].first;
-                    double variance = featureStats[c][i].second;
-                    logProbability += calculateLogProbability(data[i], mean, variance);
-                }
-            }
-
-            if (logProbability > maxLogProbability) {
-                maxLogProbability = logProbability;
-                predictedClass = c;
-            }
-        }
-
-        return predictedClass;
-    }
-};
-
-// --------------- classification ---------------
-
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
 
-    // ------------------- contours experiment -----------------------
-    // // Assuming you have a binary image (black and white)
-    // QImage binaryImage("bin_img.jpeg");
-    // QPainterPath contoursP = detectContours(binaryImage);
-    // // TODO: try with and without connecting the contours to see which model performs better
-    // std::vector<Point> contours = detectContoursV(binaryImage);
-    // // Set the proximity threshold (adjust as needed)
-    // // after a certain value (~20-30), it stops affecting the connections
-    // double proximityThreshold = 25.0; // this is, essentially, a hyperparameter
-    // // Connect nearby contours
-    // connectContours(contours, proximityThreshold);
+    // auto contours = detectContours(binImage);
+    // fftWithHighFreqCut(contours, 1);
 
-    // // Create a QPainterPath from the connected contours
     // QPainterPath connectedPath;
-    // if (!contours.empty()) {
-    //     connectedPath.moveTo(contours.front().real(), contours.front().imag());
-    //     for (const auto& point : contours) {
-    //         connectedPath.lineTo(point.real(), point.imag());
-    //     }
+    // connectedPath.moveTo(contours.front().real(), contours.front().imag());
+    // for (const auto& point : contours) {
+    //     connectedPath.lineTo(point.real(), point.imag());
     // }
 
-    // // Create a QGraphicsScene and add the contours to it
     // QGraphicsScene scene;
     // scene.addPath(connectedPath);
-    // // scene.addPath(contoursP);
-    // // Create a QGraphicsView to display the scene
+
     // QGraphicsView view(&scene);
     // view.show();
-    // ------------------- contours experiment -----------------------
-
 
     qDebug() << "Downloading MNIST dataset files...";
     DownloadDialog downloadDialog({
@@ -776,18 +481,17 @@ int main(int argc, char *argv[]) {
 
     const char* trainImagesFile = "train-images-idx3-ubyte.gz";
     const char* trainLabelsFile = "train-labels-idx1-ubyte.gz";
-    const char* testImagesFile = "t10k-images-idx3-ubyte.gz";
-    const char* testLabelsFile = "t10k-labels-idx1-ubyte.gz";
+    // const char* testImagesFile = "t10k-images-idx3-ubyte.gz";
+    // const char* testLabelsFile = "t10k-labels-idx1-ubyte.gz";
 
     qDebug() << "Reading MNIST train dataset...";
     std::vector<std::vector<uint8_t>> trainImages = readMNISTImages(trainImagesFile);
     std::vector<uint8_t> trainLabels = readMNISTLabels(trainLabelsFile);
-    std::vector<std::vector<uint8_t>> testImages = readMNISTImages(testImagesFile);
-    std::vector<uint8_t> testLabels = readMNISTLabels(testLabelsFile);
+    // std::vector<std::vector<uint8_t>> testImages = readMNISTImages(testImagesFile);
+    // std::vector<uint8_t> testLabels = readMNISTLabels(testLabelsFile);
 
-    qDebug() << "computing image contours and their magnitude spectrums...";
-    std::vector<std::vector<double>> trainData(trainImages.size() / 12);
-    for (size_t i = 0; i < trainImages.size() / 12; ++i) {
+    qDebug() << "computing image contours, FFT and cutting high frequencies...";
+    for (size_t i = 0; i < 10; ++i) {
         // Create a QImage from the vector<uint8_t>
         QImage image(trainImages[i].data(), 28, 28, QImage::Format_Grayscale8);
         if (!image.allGray()) {
@@ -795,46 +499,27 @@ int main(int argc, char *argv[]) {
         }
         QImage grayImage = image.convertToFormat(QImage::Format_Grayscale8);
         toBinImage(grayImage);
-        auto contours = detectContoursV(grayImage);
-        std::vector<double> magnituteSpectrum = applyFFT(contours);
-        trainData[i] = magnituteSpectrum;
-    }
-  
-    qDebug() << "creating classifier";
-    GaussianNaiveBayes classifier;
+        auto contours = detectContours(grayImage);
+        
+        // due to the low size of the images and small contours, the number of 
+        // high-frequencies we can cut from the fft contour is quite low and still be
+        // able to differentiate between the digits 
 
-    qDebug() << "training...";
-    classifier.train(trainData, trainLabels);
+        fftWithHighFreqCut(contours, 1);
 
-    qDebug() << "testing...";
-    std::bitset<10000> guesses;
-    for (size_t i = 0; i < testImages.size(); ++i) {
-        // Create a QImage from the vector<uint8_t>
-        QImage image(testImages[i].data(), 28, 28, QImage::Format_Grayscale8);
-        if (!image.allGray()) {
-            to_gray(image);
+        std::cout << "contours for image " << i << ":";
+        for (const auto& contourPoint : contours) {
+            std::cout << " " << contourPoint;
         }
-        QImage grayImage = image.convertToFormat(QImage::Format_Grayscale8);
-        toBinImage(grayImage);
-        auto contours = detectContoursV(grayImage);
-        std::vector<double> magnituteSpectrum = applyFFT(contours);
-
-        uint8_t predictedClass = classifier.predict(magnituteSpectrum);
-        guesses.set(i, testLabels[i] == predictedClass);
+        std::cout << std::endl << std::endl;
     }
-
-    qDebug() << "correct" << guesses.count() << "out of" << testLabels.size();
-
-    // shave off high frequencies and observe the change in accuracy
 
     qDebug() << "Cleaning up MNIST dataset files...";
     for (auto filePath : filePaths) {
         std::remove(filePath.c_str());
     }
     downloadDialog.close();
-    // qDebug() << "elems" << QApplication::topLevelWidgets();
-    app.quit();
-    return 0;
+    return app.exec();
 }
 
 #include "main.moc"
